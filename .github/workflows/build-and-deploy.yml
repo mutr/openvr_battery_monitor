@@ -1,5 +1,8 @@
 name: Build and Release
 
+permissions:
+  contents: write
+
 on:
   push:
     tags:
@@ -24,7 +27,8 @@ jobs:
           base-devel
           mingw-w64-ucrt-x86_64-toolchain
           mingw-w64-ucrt-x86_64-cmake
-          mingw-w64-ucrt-x86_64-curl
+          mingw-w64-ucrt-x86_64-boost
+          mingw-w64-ucrt-x86_64-openvr
           zip
 
     - name: Build
@@ -38,9 +42,8 @@ jobs:
       run: |
         cd build
         cp ../openvr_battery_monitor.conf .
-        cp /ucrt64/bin/libcurl-4.dll .
-        cp /ucrt64/bin/libopenvr_api.dll .
-        zip openvr_battery_monitor.zip libcurl-4.dll libopenvr_api.dll openvr_battery_monitor.exe openvr_battery_monitor.conf
+        for i in libgcc_s_seh-1.dll libwinpthread-1.dll libopenvr_api.dll libstdc++-6.dll; do cp /ucrt64/bin/$i .; done
+        zip openvr_battery_monitor.zip *.dll openvr_battery_monitor.exe openvr_battery_monitor.conf
 
     - name: Create Release
       env:

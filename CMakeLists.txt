@@ -7,7 +7,11 @@ find_library(OPENVR_LIBRARIES
     openvr_api
 )
 
-find_package(CURL REQUIRED)
+set(Boost_USE_STATIC_LIBS ON) 
+set(Boost_USE_MULTITHREADED ON)
+set(Boost_USE_STATIC_RUNTIME ON) 
+find_package(Boost REQUIRED CONFIG COMPONENTS system filesystem beast asio)
+link_directories( ${Boost_LIBRARIES})
 
 include_directories(
   ${OPENVR_INCLUDE_DIR}
@@ -16,5 +20,10 @@ include_directories(
 add_executable(${TARGET_NAME}
   openvr_battery_monitor.cpp
 )
+if(MINGW)
+  target_link_libraries(${TARGET_NAME} PRIVATE ${OPENVR_LIBRARIES} Boost::beast Boost::asio ws2_32 )
+else()
+  target_link_libraries(${TARGET_NAME} PRIVATE ${OPENVR_LIBRARIES} Boost::beast Boost::asio )
+endif()
 
-target_link_libraries(${TARGET_NAME} PRIVATE -static ${OPENVR_LIBRARIES} ${CURL_LIBRARIES})
+target_compile_features(${TARGET_NAME} PUBLIC cxx_std_20)

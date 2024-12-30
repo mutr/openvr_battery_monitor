@@ -6,10 +6,19 @@
 #include <fstream>
 #include <sstream>
 #include <filesystem>
-#include <curl/curl.h>
+#include <boost/beast/core.hpp>
+#include <boost/beast/http.hpp>
+#include <boost/beast/version.hpp>
+#include <boost/asio/connect.hpp>
+#include <boost/asio/ip/tcp.hpp>
 
 const char* OPENVR_APPLICATION_KEY = "mutr.openvr_battery_monitor";
 std::ofstream logFile;
+
+namespace beast = boost::beast;
+namespace http = beast::http;
+namespace net = boost::asio;
+using tcp = net::ip::tcp;
 
 void log(const std::string& message) {
     auto now = std::chrono::system_clock::now();
@@ -66,60 +75,78 @@ struct Config {
 
 class InfluxDBWriter {
 private:
-    CURL* curl;
-    std::string url;
-    std::string auth_header;
-    
-    static size_t WriteCallback(void* contents, size_t size, size_t nmemb, void* userp) {
-        return size * nmemb;
-    }
+    net::io_context ioc;
+    tcp::resolver resolver;
+    beast::tcp_stream stream;
+    std::string host;
+    std::string port;
+    std::string target;
+    std::string auth_token;
 
 public:
-    InfluxDBWriter(const Config& cfg) {
-        curl = curl_easy_init();
-        if (!curl) {
-            throw std::runtime_error("Failed to initialize CURL");
-        }
-
-        url = "http://" + cfg.influx_host + ":" + std::to_string(cfg.influx_port) + 
-              "/api/v2/write?org=" + cfg.influx_org + "&bucket=" + cfg.influx_bucket + 
-              "&precision=ns";
-        auth_header = "Authorization: Token " + cfg.influx_token;
+    InfluxDBWriter(const Config& cfg) 
+        : resolver(ioc)
+        , stream(ioc)
+        , host(cfg.influx_host)
+        , port(std::to_string(cfg.influx_port))
+    {
+        target = "/api/v2/write?org=" + cfg.influx_org + 
+                "&bucket=" + cfg.influx_bucket + 
+                "&precision=ns";
+        auth_token = cfg.influx_token;
         
-        log("InfluxDB writer initialized: " + cfg.influx_host + ":" + std::to_string(cfg.influx_port));
+        log("InfluxDB writer initialized: " + host + ":" + port);
     }
 
     ~InfluxDBWriter() {
-        if (curl) {
-            curl_easy_cleanup(curl);
-        }
+        beast::error_code ec;
+        stream.socket().shutdown(tcp::socket::shutdown_both, ec);
     }
 
     bool write(const std::string& line_protocol) {
-        struct curl_slist* headers = NULL;
-        headers = curl_slist_append(headers, auth_header.c_str());
-        headers = curl_slist_append(headers, "Content-Type: text/plain; charset=utf-8");
-        
-        curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
-        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
-        curl_easy_setopt(curl, CURLOPT_POSTFIELDS, line_protocol.c_str());
-        curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, WriteCallback);
-        
-        CURLcode res = curl_easy_perform(curl);
-        curl_slist_free_all(headers);
-        
-        if (res != CURLE_OK) {
-            log("Failed to send data: " + std::string(curl_easy_strerror(res)));
+        try {
+            // Look up the domain name
+            auto const results = resolver.resolve(host, port);
+
+            // Make the connection on the IP address we get from a lookup
+            stream.connect(results);
+
+            // Set up an HTTP POST request message
+            http::request<http::string_body> req{http::verb::post, target, 11};
+            req.set(http::field::host, host);
+            req.set(http::field::user_agent, BOOST_BEAST_VERSION_STRING);
+            req.set(http::field::content_type, "text/plain; charset=utf-8");
+            req.set("Authorization", "Token " + auth_token);
+            req.body() = line_protocol;
+            req.prepare_payload();
+
+            // Send the HTTP request to the remote host
+            http::write(stream, req);
+
+            // This buffer is used for reading and must be persisted
+            beast::flat_buffer buffer;
+
+            // Declare a container to hold the response
+            http::response<http::dynamic_body> res;
+
+            // Receive the HTTP response
+            http::read(stream, buffer, res);
+
+            // Gracefully close the socket
+            beast::error_code ec;
+            stream.socket().shutdown(tcp::socket::shutdown_both, ec);
+
+            if (res.result() < http::status::ok || res.result() >= http::status::multiple_choices) {
+                log("HTTP error: " + std::to_string(static_cast<int>(res.result())));
+                return false;
+            }
+
+            return true;
+        }
+        catch (const std::exception& e) {
+            log("Failed to send data: " + std::string(e.what()));
             return false;
         }
-        
-        long http_code = 0;
-        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-        if (http_code < 200 || http_code >= 300) {
-            log("HTTP error: " + std::to_string(http_code));
-            return false;
-        }
-        return true;
     }
 };
 
@@ -194,7 +221,7 @@ public:
         auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
             now.time_since_epoch()).count();
 
-        log("===");
+        log("=== " + std::format("{:%Y-%m-%d %T}",now));
         for (vr::TrackedDeviceIndex_t device = 0; 
              device < vr::k_unMaxTrackedDeviceCount; device++) {
             
@@ -333,8 +360,6 @@ int main(int argc, char* argv[]) {
         log("Loading config from: " + confPath.string());
         Config config = Config::load(confPath.string());
         
-        curl_global_init(CURL_GLOBAL_ALL);
-
         VRSystem vr;
         InfluxDBWriter influx(config);
 
@@ -355,7 +380,6 @@ int main(int argc, char* argv[]) {
                 std::chrono::seconds(config.interval_seconds));
         }
 
-        curl_global_cleanup();
         return 0;
     } catch (const std::exception& e) {
         log("Fatal error: " + std::string(e.what()));
